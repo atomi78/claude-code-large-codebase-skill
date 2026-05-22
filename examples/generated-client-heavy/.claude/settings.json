@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(clients/generated/**)",
+      "Edit(clients/generated/**)",
+      "Write(clients/generated/**)"
+    ]
+  }
+}

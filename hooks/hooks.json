@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./.claude/hooks/check-claude-md-size.sh"
+          },
+          {
+            "type": "command",
+            "command": "./.claude/hooks/warn-generated-file-edit.sh"
+          },
+          {
+            "type": "command",
+            "command": "./.claude/hooks/suggest-local-claude-md.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

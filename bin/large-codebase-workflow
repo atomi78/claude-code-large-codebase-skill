@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SKILL_SOURCE="$PLUGIN_ROOT/skills/large-codebase-setup"
+SKILLS_ROOT="$PLUGIN_ROOT/skills"
+COMMANDS_ROOT="$PLUGIN_ROOT/commands"
+HOOKS_ROOT="$PLUGIN_ROOT/hooks"
+
+usage() {
+  cat <<'EOF'
+large-codebase-workflow
+
+Usage:
+  large-codebase-workflow menu
+  large-codebase-workflow install-skills [personal|project]
+  large-codebase-workflow install-commands [personal|project]
+  large-codebase-workflow install-menu-command [personal|project]
+  large-codebase-workflow install-hooks [project]
+  large-codebase-workflow doctor [path]
+  large-codebase-workflow audit [path]
+  large-codebase-workflow scaffold [path]
+  large-codebase-workflow plugin-command
+
+Commands:
+  menu             Open an interactive menu.
+  install-skills   Copy all skills to ~/.claude/skills or .claude/skills.
+  install-commands Copy all slash commands to ~/.claude/commands or .claude/commands.
+  install-menu-command
+                   Install a plain /menu slash command for Claude Code.
+  install-hooks    Install optional project hooks and merge hook settings.
+  doctor           Check plugin files, commands, skills, hooks, and JSON.
+  audit            Print a lightweight Claude Code setup audit for a repo.
+  scaffold         Create starter CLAUDE.md and CODEBASE_MAP.md files if missing.
+  plugin-command   Print the Claude Code command for the plugin skill.
+EOF
+}
+
+repo_root() {
+  local start="${1:-$PWD}"
+  local abs_start
+  local git_root
+  abs_start="$(cd "$start" && pwd)"
+  if command -v git >/dev/null 2>&1 && git -C "$start" rev-parse --show-toplevel >/dev/null 2>&1; then
+    git_root="$(git -C "$start" rev-parse --show-toplevel)"
+    if [ "$git_root" = "$HOME" ] && [ "$abs_start" != "$HOME" ]; then
+      echo "$abs_start"
+    else
+      echo "$git_root"
+    fi
+  else
+    echo "$abs_start"
+  fi
+}
+
+install_skills() {
+  local mode="${1:-personal}"
+  local dest
+
+  case "$mode" in
+    personal)
+      dest="$HOME/.claude/skills"
+      ;;
+    project)
+      dest="$(pwd)/.claude/skills"
+      ;;
+    *)
+      echo "Unknown install target: $mode" >&2
+      echo "Use personal or project." >&2
+      exit 2
+      ;;
+  esac
+
+  mkdir -p "$dest"
+  for skill in "$SKILLS_ROOT"/*; do
+    [ -d "$skill" ] || continue
+    rm -rf "$dest/$(basename "$skill")"
+    cp -R "$skill" "$dest/"
+    echo "Installed skill $(basename "$skill") to $dest"
+  done
+}
+
+render_command() {
+  local source="$1"
+  local dest="$2"
+  local absolute_cli="$PLUGIN_ROOT/bin/large-codebase-workflow"
+
+  sed \
+    -e "s#allowed-tools: Bash(large-codebase-workflow audit:\\*)#allowed-tools: Bash($absolute_cli audit:*)#g" \
+    -e "s#allowed-tools: Bash(large-codebase-workflow scaffold:\\*)#allowed-tools: Bash($absolute_cli scaffold:*)#g" \
+    -e "s#large-codebase-workflow audit \.#$absolute_cli audit .#g" \
+    -e "s#large-codebase-workflow scaffold \.#$absolute_cli scaffold .#g" \
+    "$source" > "$dest"
+}
+
+commands_dest() {
+  local mode="${1:-personal}"
+  local dest
+
+  case "$mode" in
+    personal)
+      dest="$HOME/.claude/commands"
+      ;;
+    project)
+      dest="$(pwd)/.claude/commands"
+      ;;
+    *)
+      echo "Unknown install target: $mode" >&2
+      echo "Use personal or project." >&2
+      exit 2
+      ;;
+  esac
+  echo "$dest"
+}
+
+install_commands() {
+  local mode="${1:-personal}"
+  local dest
+  dest="$(commands_dest "$mode")"
+
+  mkdir -p "$dest"
+  for command_file in "$COMMANDS_ROOT"/*.md; do
+    [ -f "$command_file" ] || continue
+    render_command "$command_file" "$dest/$(basename "$command_file")"
+    echo "Installed slash command /$(basename "$command_file" .md) to $dest"
+  done
+  echo "Restart Claude Code if new slash commands do not appear immediately."
+}
+
+install_menu_command() {
+  local mode="${1:-personal}"
+  local dest
+  dest="$(commands_dest "$mode")"
+
+  mkdir -p "$dest"
+  render_command "$COMMANDS_ROOT/menu.md" "$dest/menu.md"
+  echo "Installed slash command to $dest/menu.md"
+  echo "Restart Claude Code if /menu does not appear immediately."
+}
+
+install_hooks() {
+  local mode="${1:-project}"
+  local root
+  local settings
+
+  if [ "$mode" != "project" ]; then
+    echo "Only project hook installation is supported. Hooks use repo-relative paths." >&2
+    exit 2
+  fi
+
+  root="$(repo_root "$PWD")"
+  mkdir -p "$root/.claude/hooks"
+  cp "$HOOKS_ROOT"/*.sh "$root/.claude/hooks/"
+  chmod +x "$root/.claude/hooks/"*.sh
+
+  settings="$root/.claude/settings.json"
+  if command -v node >/dev/null 2>&1; then
+    mkdir -p "$root/.claude"
+    SETTINGS_PATH="$settings" node <<'NODE'
+const fs = require("fs");
+const path = process.env.SETTINGS_PATH;
+let settings = {};
+if (fs.existsSync(path)) {
+  settings = JSON.parse(fs.readFileSync(path, "utf8"));
+}
+settings.hooks ||= {};
+settings.hooks.PostToolUse ||= [];
+const matcher = "Edit|MultiEdit|Write";
+const commands = [
+  "./.claude/hooks/check-claude-md-size.sh",
+  "./.claude/hooks/warn-generated-file-edit.sh",
+  "./.claude/hooks/suggest-local-claude-md.sh",
+];
+let entry = settings.hooks.PostToolUse.find((item) => item.matcher === matcher);
+if (!entry) {
+  entry = { matcher, hooks: [] };
+  settings.hooks.PostToolUse.push(entry);
+}
+for (const command of commands) {
+  if (!entry.hooks.some((hook) => hook.type === "command" && hook.command === command)) {
+    entry.hooks.push({ type: "command", command });
+  }
+}
+fs.writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
+NODE
+    echo "Installed hooks and updated $settings"
+  else
+    cp "$HOOKS_ROOT/hooks.json" "$root/.claude/settings.large-codebase-hooks.example.json"
+    echo "Installed hook scripts. Node.js was not found, so hook settings were copied to $root/.claude/settings.large-codebase-hooks.example.json for manual merge."
+  fi
+}
+
+audit_repo() {
+  local root
+  root="$(repo_root "${1:-$PWD}")"
+
+  echo "Claude Code large-codebase audit"
+  echo "Root: $root"
+  echo
+
+  echo "Repository shape"
+  if [ -d "$root/.git" ]; then
+    echo "- Git repository: yes"
+  else
+    echo "- Git repository: not detected at root"
+  fi
+
+  echo "- Top-level directories:"
+  find "$root" -maxdepth 1 -type d \
+    ! -path "$root" \
+    ! -name ".git" \
+    ! -name "node_modules" \
+    -print | sed "s#^$root/##" | sort | sed 's/^/  - /'
+  echo
+
+  echo "Claude Code harness"
+  [ -f "$root/CLAUDE.md" ] && echo "- Root CLAUDE.md: present" || echo "- Root CLAUDE.md: missing"
+  [ -f "$root/CODEBASE_MAP.md" ] && echo "- CODEBASE_MAP.md: present" || echo "- CODEBASE_MAP.md: missing"
+  [ -f "$root/.claude/settings.json" ] && echo "- .claude/settings.json: present" || echo "- .claude/settings.json: missing"
+  [ -d "$root/.claude/commands" ] && echo "- Project slash commands: present" || echo "- Project slash commands: none"
+  [ -d "$root/.claude/hooks" ] && echo "- Project hooks: present" || echo "- Project hooks: none"
+  if [ -d "$root/.claude/skills" ]; then
+    echo "- Project skills:"
+    find "$root/.claude/skills" -maxdepth 2 -name SKILL.md -print | sed "s#^$root/.claude/skills/##" | sort | sed 's#/SKILL.md$##' | sed 's/^/  - /'
+  else
+    echo "- Project skills: none"
+  fi
+  echo
+
+  echo "Likely noise paths"
+  for path in node_modules dist build coverage .next .turbo target vendor; do
+    if [ -e "$root/$path" ]; then
+      echo "- $path exists; consider excluding if it is not normally edited"
+    fi
+  done
+  echo
+
+  echo "Validation hints"
+  for file in package.json Makefile justfile Taskfile.yml pnpm-workspace.yaml turbo.json nx.json pyproject.toml Cargo.toml go.mod; do
+    if [ -e "$root/$file" ]; then
+      echo "- Found $file"
+    fi
+  done
+  echo
+
+  echo "Next Claude prompt"
+  echo "/large-codebase-workflow:large-codebase-setup audit this repo and propose focused setup changes"
+}
+
+doctor() {
+  local target="${1:-$PLUGIN_ROOT}"
+  local ok=0
+
+  echo "Large Codebase Workflow doctor"
+  echo "Target: $target"
+  echo
+
+  check_file() {
+    if [ -e "$1" ]; then
+      echo "ok - $1"
+    else
+      echo "missing - $1"
+      ok=1
+    fi
+  }
+
+  check_file "$PLUGIN_ROOT/.claude-plugin/plugin.json"
+  check_file "$PLUGIN_ROOT/bin/large-codebase-workflow"
+  check_file "$PLUGIN_ROOT/commands/menu.md"
+  check_file "$PLUGIN_ROOT/hooks/hooks.json"
+
+  echo
+  echo "Skills:"
+  find "$PLUGIN_ROOT/skills" -maxdepth 2 -name SKILL.md -print | sort | sed 's#^.*/skills/#- #; s#/SKILL.md$##'
+
+  echo
+  echo "Commands:"
+  find "$PLUGIN_ROOT/commands" -maxdepth 1 -name '*.md' -print | sort | sed 's#^.*/commands/#- /#; s#\.md$##'
+
+  echo
+  if command -v node >/dev/null 2>&1; then
+    node -e "JSON.parse(require('fs').readFileSync('$PLUGIN_ROOT/.claude-plugin/plugin.json','utf8')); JSON.parse(require('fs').readFileSync('$PLUGIN_ROOT/hooks/hooks.json','utf8'));"
+    echo "ok - JSON files parse"
+  else
+    echo "skip - Node.js not found, JSON parse check skipped"
+  fi
+
+  echo
+  bash -n "$PLUGIN_ROOT/bin/large-codebase-workflow"
+  for hook in "$PLUGIN_ROOT"/hooks/*.sh; do
+    bash -n "$hook"
+  done
+  echo "ok - shell syntax checks passed"
+
+  return "$ok"
+}
+
+copy_template_if_missing() {
+  local template="$1"
+  local dest="$2"
+  if [ -f "$dest" ]; then
+    echo "Kept existing $dest"
+  else
+    cp "$template" "$dest"
+    echo "Created $dest"
+  fi
+}
+
+scaffold_repo() {
+  local root
+  root="$(repo_root "${1:-$PWD}")"
+  mkdir -p "$root/.claude"
+  copy_template_if_missing "$SKILL_SOURCE/templates/root-CLAUDE.md" "$root/CLAUDE.md"
+  copy_template_if_missing "$SKILL_SOURCE/templates/CODEBASE_MAP.md" "$root/CODEBASE_MAP.md"
+  if [ ! -f "$root/.claude/settings.json" ]; then
+    printf '{\n  "permissions": {\n    "deny": []\n  }\n}\n' > "$root/.claude/settings.json"
+    echo "Created $root/.claude/settings.json"
+  else
+    echo "Kept existing $root/.claude/settings.json"
+  fi
+}
+
+plugin_command() {
+  echo "/large-codebase-workflow:large-codebase-setup audit this repo and recommend changes"
+}
+
+menu() {
+  while true; do
+    cat <<'EOF'
+
+Claude Code Large Codebase Workflow
+
+1. Show plugin command
+2. Install standalone skill to ~/.claude/skills
+3. Install standalone skills to current project
+4. Install all slash commands to ~/.claude/commands
+5. Install all slash commands to current project
+6. Install optional hooks to current project
+7. Audit current repository
+8. Scaffold current repository
+9. Run doctor
+10. Quit
+EOF
+    printf "Choose an option: "
+    read -r choice
+    case "$choice" in
+      1) plugin_command ;;
+      2) install_skills personal ;;
+      3) install_skills project ;;
+      4) install_commands personal ;;
+      5) install_commands project ;;
+      6) install_hooks project ;;
+      7) audit_repo "$PWD" ;;
+      8) scaffold_repo "$PWD" ;;
+      9) doctor "$PWD" ;;
+      10|q|quit|exit) exit 0 ;;
+      *) echo "Unknown option: $choice" ;;
+    esac
+  done
+}
+
+cmd="${1:-menu}"
+shift || true
+
+case "$cmd" in
+  menu) menu ;;
+  install-skill|install-skills) install_skills "${1:-personal}" ;;
+  install-commands) install_commands "${1:-personal}" ;;
+  install-menu-command) install_menu_command "${1:-personal}" ;;
+  install-hooks) install_hooks "${1:-project}" ;;
+  doctor) doctor "${1:-$PLUGIN_ROOT}" ;;
+  audit) audit_repo "${1:-$PWD}" ;;
+  scaffold) scaffold_repo "${1:-$PWD}" ;;
+  plugin-command) plugin_command ;;
+  -h|--help|help) usage ;;
+  *) usage; exit 2 ;;
+esac

@@ -1,0 +1,11 @@
+{
+  "name": "large-codebase-workflow",
+  "description": "Claude Code workflow for making large codebases navigable with layered CLAUDE.md files, scoped commands, codebase maps, exclusions, skills, and rollout guidance.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Tomasz Bogus"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/tomaszbogus/claude-code-large-codebase-skill",
+  "repository": "https://github.com/tomaszbogus/claude-code-large-codebase-skill"
+}
