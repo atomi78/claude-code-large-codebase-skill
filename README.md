@@ -6,6 +6,8 @@ It turns Anthropic's large-codebase guidance into practical workflows: layered `
 
 Source article: [How Claude Code works in large codebases: Best practices and where to start](https://claude.com/blog/how-claude-code-works-in-large-codebases-best-practices-and-where-to-start).
 
+For consulting positioning and enterprise sales messaging, see [docs/value-proposition.md](docs/value-proposition.md).
+
 ## Use As A Plugin
 
 Load the plugin directly during development:
